@@ -1,0 +1,16 @@
+[
+  {
+    "id": "admin-1",
+    "name": "Quản trị viên",
+    "email": "admin@techgear.vn",
+    "password": "admin",
+    "role": "admin"
+  },
+  {
+    "id": "customer-1",
+    "name": "Khách hàng TechGear",
+    "email": "customer@techgear.vn",
+    "password": "customer",
+    "role": "customer"
+  }
+]
