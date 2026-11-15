@@ -4,10 +4,24 @@ import { Link, NavLink, useNavigate, useLocation } from 'react-router';
 import { useTheme } from '../app/theme-context';
 import { useAuthStore } from '../features/auth/store';
 import { useCartStore } from '../features/cart/store';
+import { useNotificationStore } from '../features/notifications/store';
+import type { AppNotification } from '../features/notifications/types';
 import { useProductStore } from '../features/products/store';
 import { getProductPrimaryImage } from '../features/products/utils';
 
 const formatPrice = (price: number) => `${price.toLocaleString('vi-VN')} đ`;
+
+const formatTimeAgo = (dateStr: string): string => {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(diff / (1000 * 60));
+  if (mins < 1) return 'Vừa xong';
+  if (mins < 60) return `${mins} phút trước`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} giờ trước`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days} ngày trước`;
+  return new Date(dateStr).toLocaleDateString('vi-VN');
+};
 
 const trendingKeywords = [
   'Chuột Logitech',
@@ -44,10 +58,20 @@ export default function Header({
   const [isAccountOpen, setIsAccountOpen] = useState(false);
   const [isCartHovered, setIsCartHovered] = useState(false);
   const [isProductMenuOpen, setIsProductMenuOpen] = useState(false);
+  const [isNotifOpen, setIsNotifOpen] = useState(false);
+
+  // Notification Store & Realtime
+  const notifications = useNotificationStore((state) => state.notifications);
+  const fetchNotifications = useNotificationStore((state) => state.fetchNotifications);
+  const markAsRead = useNotificationStore((state) => state.markAsRead);
+  const markAllAsRead = useNotificationStore((state) => state.markAllAsRead);
+  const subscribeRealtime = useNotificationStore((state) => state.subscribeRealtime);
+  const unsubscribeRealtime = useNotificationStore((state) => state.unsubscribeRealtime);
 
   const searchRef = useRef<HTMLDivElement>(null);
   const accountRef = useRef<HTMLDivElement>(null);
   const cartRef = useRef<HTMLDivElement>(null);
+  const notifRef = useRef<HTMLDivElement>(null);
   const productMenuRef = useRef<HTMLLIElement>(null);
 
   const allProducts = useProductStore((state) => state.products);
@@ -57,12 +81,34 @@ export default function Header({
     fetchProducts();
   }, [fetchProducts]);
 
+  useEffect(() => {
+    fetchNotifications(user);
+    subscribeRealtime(user);
+    return () => unsubscribeRealtime();
+  }, [user, fetchNotifications, subscribeRealtime, unsubscribeRealtime]);
+
+  // Filter notifications relevant to current user
+  const userNotifications = useMemo(() => {
+    const isAdmin = user?.role === 'admin';
+    return notifications.filter((n) => {
+      if (isAdmin) {
+        return n.recipientRole === 'admin' || n.recipientRole === 'all' || (user?.id && n.userId === user.id);
+      }
+      return n.recipientRole === 'customer' || n.recipientRole === 'all' || (user?.id && n.userId === user.id);
+    });
+  }, [notifications, user]);
+
+  const unreadNotifCount = useMemo(() => {
+    return userNotifications.filter((n) => !n.isRead).length;
+  }, [userNotifications]);
+
   // Auto close menus when route changes
   useEffect(() => {
     setIsProductMenuOpen(false);
     setIsCartHovered(false);
     setIsSearchOpen(false);
     setIsAccountOpen(false);
+    setIsNotifOpen(false);
     if (setIsMobileMenuOpen) {
       setIsMobileMenuOpen(false);
     }
@@ -86,6 +132,9 @@ export default function Header({
       if (accountRef.current && !accountRef.current.contains(e.target as Node)) {
         setIsAccountOpen(false);
       }
+      if (notifRef.current && !notifRef.current.contains(e.target as Node)) {
+        setIsNotifOpen(false);
+      }
       if (cartRef.current && !cartRef.current.contains(e.target as Node)) {
         setIsCartHovered(false);
       }
@@ -96,6 +145,18 @@ export default function Header({
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  const handleNotificationClick = (notif: AppNotification) => {
+    void markAsRead(notif.id);
+    setIsNotifOpen(false);
+    if (notif.link) {
+      navigate(notif.link);
+    }
+  };
+
+  const handleMarkAllRead = () => {
+    void markAllAsRead(user);
+  };
 
   const handleSearchSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -300,6 +361,86 @@ export default function Header({
                 </div>
               </div>
             </a>
+
+            {/* Notification Bell Dropdown */}
+            <div className="notification-dropdown-wrapper" ref={notifRef}>
+              <button
+                type="button"
+                className="notification-trigger-btn"
+                onClick={() => setIsNotifOpen((prev) => !prev)}
+                title="Thông báo"
+                aria-label="Xem thông báo"
+              >
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+                  <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+                </svg>
+                {unreadNotifCount > 0 && (
+                  <span className="notification-badge" title={`${unreadNotifCount} thông báo mới`}>
+                    {unreadNotifCount > 9 ? '9+' : unreadNotifCount}
+                  </span>
+                )}
+              </button>
+
+              {isNotifOpen && (
+                <div className="notification-popover shadow-lg">
+                  <div className="notification-header">
+                    <span className="notification-header-title">
+                      🔔 Thông báo {unreadNotifCount > 0 && `(${unreadNotifCount})`}
+                    </span>
+                    {unreadNotifCount > 0 && (
+                      <button
+                        type="button"
+                        className="notification-mark-all-btn"
+                        onClick={handleMarkAllRead}
+                        title="Đánh dấu tất cả là đã đọc"
+                      >
+                        ✓ Đã đọc tất cả
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="notification-list">
+                    {userNotifications.length === 0 ? (
+                      <div className="notification-empty">
+                        <span className="notification-empty-icon">🔕</span>
+                        <span>Bạn chưa có thông báo nào.</span>
+                      </div>
+                    ) : (
+                      userNotifications.map((notif) => {
+                        const iconMap = {
+                          order: '📦',
+                          shipping: '🚚',
+                          refund: '↩️',
+                          promo: '🎁',
+                          system: '⚙️',
+                        };
+                        return (
+                          <button
+                            key={notif.id}
+                            type="button"
+                            className={`notification-item ${!notif.isRead ? 'unread' : ''}`}
+                            onClick={() => handleNotificationClick(notif)}
+                          >
+                            <span className="notification-item-icon">
+                              {iconMap[notif.type] || '🔔'}
+                            </span>
+                            <div className="notification-item-content">
+                              <div className="notification-item-title">{notif.title}</div>
+                              <div className="notification-item-msg">{notif.message}</div>
+                              <span className="notification-item-time">
+                                {formatTimeAgo(notif.createdAt)}
+                              </span>
+                            </div>
+                            {!notif.isRead && <span className="notification-unread-dot" />}
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
 
             {/* Account Popover Trigger */}
             <div

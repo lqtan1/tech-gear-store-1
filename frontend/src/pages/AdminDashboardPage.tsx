@@ -1,10 +1,11 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
-import { Link } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
 
 import Toast from '../components/Toast';
 import { useAuthStore } from '../features/auth/store';
 import { useArticleStore, slugify } from '../features/news/store';
 import type { Article, ArticleInput } from '../features/news/types';
+import { useNotificationStore } from '../features/notifications/store';
 import { ORDER_STATUS_LABELS as statusLabels } from '../features/orders/constants';
 import { useOrderStore } from '../features/orders/store';
 import type { Order, OrderStatus } from '../features/orders/types';
@@ -62,7 +63,25 @@ export default function AdminDashboardPage() {
     fetchArticlesStore();
   }, [fetchArticlesStore]);
 
-  const [activeTab, setActiveTab] = useState<'analytics' | 'products' | 'articles'>('analytics');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialTab = searchParams.get('tab') as 'analytics' | 'orders' | 'products' | 'articles' | null;
+  const [activeTab, setActiveTab] = useState<'analytics' | 'orders' | 'products' | 'articles'>(
+    initialTab === 'orders' || initialTab === 'products' || initialTab === 'articles' ? initialTab : 'analytics',
+  );
+
+  useEffect(() => {
+    const tabParam = searchParams.get('tab');
+    if (tabParam === 'orders' || tabParam === 'analytics' || tabParam === 'products' || tabParam === 'articles') {
+      setActiveTab(tabParam);
+    }
+  }, [searchParams]);
+
+  const handleTabChange = (tab: 'analytics' | 'orders' | 'products' | 'articles') => {
+    setActiveTab(tab);
+    setSearchParams({ tab });
+  };
+
+  const [orderSearch, setOrderSearch] = useState('');
   const [productSearch, setProductSearch] = useState('');
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState('Tất cả');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -320,9 +339,50 @@ export default function AdminDashboardPage() {
   const [orderStatusFilter, setOrderStatusFilter] = useState<'all' | OrderStatus>('all');
 
   const filteredOrders = useMemo(() => {
-    if (orderStatusFilter === 'all') return orders;
-    return orders.filter((order) => order.status === orderStatusFilter);
-  }, [orders, orderStatusFilter]);
+    let result = orders;
+    if (orderStatusFilter !== 'all') {
+      result = result.filter((order) => order.status === orderStatusFilter);
+    }
+    if (orderSearch.trim()) {
+      const q = orderSearch.trim().toLowerCase();
+      result = result.filter(
+        (order) =>
+          order.id.toLowerCase().includes(q) ||
+          order.shipping.name.toLowerCase().includes(q) ||
+          (order.customerEmail && order.customerEmail.toLowerCase().includes(q)) ||
+          order.shipping.phone.toLowerCase().includes(q) ||
+          (order.trackingCode && order.trackingCode.toLowerCase().includes(q)),
+      );
+    }
+    return result;
+  }, [orders, orderStatusFilter, orderSearch]);
+
+  // Group completed/active orders by date for timeline chart (last 7 points)
+  const timelineRevenueData = useMemo(() => {
+    const dateMap: Record<string, { dateStr: string; label: string; revenue: number; orderCount: number }> = {};
+    const now = new Date();
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+      const key = d.toISOString().split('T')[0];
+      const label = `${d.getDate()}/${d.getMonth() + 1}`;
+      dateMap[key] = { dateStr: key, label, revenue: 0, orderCount: 0 };
+    }
+
+    orders.forEach((o) => {
+      if (o.status === 'cancelled') return;
+      const oDate = new Date(o.createdAt).toISOString().split('T')[0];
+      if (dateMap[oDate]) {
+        dateMap[oDate].revenue += o.total;
+        dateMap[oDate].orderCount += 1;
+      } else {
+        const d = new Date(o.createdAt);
+        const label = `${d.getDate()}/${d.getMonth() + 1}`;
+        dateMap[oDate] = { dateStr: oDate, label, revenue: o.total, orderCount: 1 };
+      }
+    });
+
+    return Object.values(dateMap).slice(-7);
+  }, [orders]);
 
   const handleOrderStatusChange = (orderId: string, newStatus: OrderStatus) => {
     const targetOrder = orders.find((o) => o.id === orderId);
@@ -350,6 +410,16 @@ export default function AdminDashboardPage() {
       setToastMessage(
         `🚚 Đã chuyển đơn hàng ${orderId} sang "Đang vận chuyển" (Mã vận đơn: ${resolvedTracking} - ${resolvedCarrier}).`,
       );
+
+      // Gửi thông báo cho khách hàng
+      void useNotificationStore.getState().addNotification({
+        userId: targetOrder?.userId,
+        recipientRole: 'customer',
+        title: 'Đơn hàng đang trên đường giao đến bạn 🚚',
+        message: `Đơn hàng ${orderId} đang được giao bởi ${resolvedCarrier}. Mã vận đơn: ${resolvedTracking}.`,
+        type: 'shipping',
+        link: '/orders',
+      });
     } else {
       updateStatus(orderId, newStatus);
 
@@ -365,6 +435,21 @@ export default function AdminDashboardPage() {
       setToastMessage(
         `✓ Đã cập nhật trạng thái đơn ${orderId} sang "${statusLabels[newStatus] || newStatus}".`,
       );
+
+      // Gửi thông báo cho khách hàng khi giao xong hoặc hủy
+      if (newStatus === 'completed' || newStatus === 'cancelled') {
+        void useNotificationStore.getState().addNotification({
+          userId: targetOrder?.userId,
+          recipientRole: 'customer',
+          title: newStatus === 'completed' ? 'Đơn hàng đã được giao thành công! 🎉' : 'Đơn hàng đã bị hủy ✕',
+          message:
+            newStatus === 'completed'
+              ? `Đơn hàng ${orderId} đã giao thành công. Cảm ơn bạn đã lựa chọn TechGear!`
+              : `Đơn hàng ${orderId} đã được hủy theo yêu cầu.`,
+          type: 'order',
+          link: '/orders',
+        });
+      }
     }
   };
 
@@ -397,6 +482,16 @@ export default function AdminDashboardPage() {
     setToastMessage(
       `✅ Đã duyệt hoàn tiền đơn ${order.id} và tự động cộng lại +${totalQty} sản phẩm vào kho hàng thành công!`,
     );
+
+    // Gửi thông báo cho khách hàng
+    void useNotificationStore.getState().addNotification({
+      userId: order.userId,
+      recipientRole: 'customer',
+      title: 'Yêu cầu hoàn tiền đã được phê duyệt ✅',
+      message: `Đơn hàng ${order.id} đã được chấp thuận hoàn trả ${formatPrice(order.total)}. Tiền sẽ được chuyển về tài khoản của bạn.`,
+      type: 'refund',
+      link: '/orders',
+    });
   };
 
   const handleRejectRefund = async (order: Order) => {
@@ -424,6 +519,16 @@ export default function AdminDashboardPage() {
     }
 
     setToastMessage(`❌ Đã từ chối hoàn trả đơn ${order.id} (chuyển về trạng thái Đã giao hàng).`);
+
+    // Gửi thông báo cho khách hàng
+    void useNotificationStore.getState().addNotification({
+      userId: order.userId,
+      recipientRole: 'customer',
+      title: 'Yêu cầu hoàn trả đã bị từ chối ❌',
+      message: `Đơn hàng ${order.id}: ${trimmedReason}`,
+      type: 'refund',
+      link: '/orders',
+    });
   };
 
   const totalStockUnits = useMemo(
@@ -810,21 +915,28 @@ export default function AdminDashboardPage() {
           <button
             type="button"
             className={`admin-tab-btn ${activeTab === 'analytics' ? 'active' : ''}`}
-            onClick={() => setActiveTab('analytics')}
+            onClick={() => handleTabChange('analytics')}
           >
-            📊 Thống Kê & Đơn Hàng ({orders.length})
+            📊 Thống Kê & Báo Cáo
+          </button>
+          <button
+            type="button"
+            className={`admin-tab-btn ${activeTab === 'orders' ? 'active' : ''}`}
+            onClick={() => handleTabChange('orders')}
+          >
+            📋 Quản Lý Đơn Hàng ({orders.length})
           </button>
           <button
             type="button"
             className={`admin-tab-btn ${activeTab === 'products' ? 'active' : ''}`}
-            onClick={() => setActiveTab('products')}
+            onClick={() => handleTabChange('products')}
           >
-            📦 Quản Lý Sản Phẩm CRUD ({products.length})
+            📦 Quản Lý Sản Phẩm ({products.length})
           </button>
           <button
             type="button"
             className={`admin-tab-btn ${activeTab === 'articles' ? 'active' : ''}`}
-            onClick={() => setActiveTab('articles')}
+            onClick={() => handleTabChange('articles')}
           >
             📰 Quản Lý Bài Viết ({articles.length})
           </button>
@@ -950,6 +1062,192 @@ export default function AdminDashboardPage() {
               </div>
             )}
 
+            {/* Visual SVG Charts Section */}
+            <div className="admin-charts-grid mb-6">
+              {/* Chart 1: Revenue Timeline Bar + Trendline Chart */}
+              <div className="timeline-chart-container shadow-sm">
+                <div className="chart-header">
+                  <div>
+                    <h3 className="chart-title">📈 Doanh Thu 7 Ngày Gần Nhất</h3>
+                    <span className="chart-sub">Biểu đồ cột kết hợp đường xu hướng doanh thu theo ngày</span>
+                  </div>
+                  <span className="chart-total-badge">
+                    Tổng 7 ngày: {formatPrice(timelineRevenueData.reduce((s, d) => s + d.revenue, 0))}
+                  </span>
+                </div>
+
+                <div className="svg-chart-wrapper">
+                  <svg viewBox="0 0 650 230" className="w-full h-auto" preserveAspectRatio="xMidYMid meet">
+                    <defs>
+                      <linearGradient id="revenueBarGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#2563eb" stopOpacity="0.9" />
+                        <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.35" />
+                      </linearGradient>
+                      <linearGradient id="trendAreaGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.25" />
+                        <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.0" />
+                      </linearGradient>
+                    </defs>
+
+                    {/* Horizontal Grid lines */}
+                    <line x1="40" y1="40" x2="620" y2="40" stroke="#94a3b8" strokeOpacity="0.2" strokeDasharray="4 4" />
+                    <line x1="40" y1="100" x2="620" y2="100" stroke="#94a3b8" strokeOpacity="0.2" strokeDasharray="4 4" />
+                    <line x1="40" y1="160" x2="620" y2="160" stroke="#94a3b8" strokeOpacity="0.3" />
+
+                    {/* Bars and Data points */}
+                    {(() => {
+                      const maxRev = Math.max(...timelineRevenueData.map((d) => d.revenue), 1000000);
+                      const points = timelineRevenueData.map((d, i) => {
+                        const x = 60 + i * 80 + 20;
+                        const y = 160 - (d.revenue / maxRev) * 115;
+                        return { x, y, ...d };
+                      });
+
+                      const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
+                      const areaD = `${pathD} L ${points[points.length - 1].x} 160 L ${points[0].x} 160 Z`;
+
+                      return (
+                        <>
+                          {/* Smooth Trend Area */}
+                          <path d={areaD} fill="url(#trendAreaGrad)" />
+                          <path d={pathD} fill="none" stroke="#2563eb" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+
+                          {/* Bars */}
+                          {points.map((p) => {
+                            const barH = Math.max(4, (p.revenue / maxRev) * 115);
+                            const barY = 160 - barH;
+                            return (
+                              <g key={p.dateStr}>
+                                <rect
+                                  x={p.x - 18}
+                                  y={barY}
+                                  width="36"
+                                  height={barH}
+                                  rx="5"
+                                  fill="url(#revenueBarGrad)"
+                                  className="transition-all duration-300 hover:opacity-80"
+                                />
+                                <circle cx={p.x} cy={p.y} r="4" fill="#2563eb" stroke="#ffffff" strokeWidth="2" />
+                                <text
+                                  x={p.x}
+                                  y={barY - 7}
+                                  textAnchor="middle"
+                                  fontSize="10"
+                                  fontWeight="700"
+                                  fill="currentColor"
+                                >
+                                  {p.revenue >= 1000000
+                                    ? `${(p.revenue / 1000000).toFixed(1)}Tr`
+                                    : p.revenue > 0
+                                      ? `${Math.round(p.revenue / 1000)}k`
+                                      : '0đ'}
+                                </text>
+                                <text
+                                  x={p.x}
+                                  y="182"
+                                  textAnchor="middle"
+                                  fontSize="11"
+                                  fontWeight="600"
+                                  fill="#94a3b8"
+                                >
+                                  {p.label}
+                                </text>
+                                <text
+                                  x={p.x}
+                                  y="198"
+                                  textAnchor="middle"
+                                  fontSize="9.5"
+                                  fill="#64748b"
+                                >
+                                  {p.orderCount} đơn
+                                </text>
+                              </g>
+                            );
+                          })}
+                        </>
+                      );
+                    })()}
+                  </svg>
+                </div>
+              </div>
+
+              {/* Chart 2: Category Donut Chart */}
+              <div className="donut-chart-container shadow-sm">
+                <div className="chart-header">
+                  <div>
+                    <h3 className="chart-title">🍩 Tỷ Trọng Theo Nhóm Thiết Bị</h3>
+                    <span className="chart-sub">Tỷ lệ cơ cấu doanh thu theo dòng sản phẩm</span>
+                  </div>
+                </div>
+
+                <div className="donut-body flex flex-col md:flex-row items-center justify-around gap-4 p-4">
+                  <div className="donut-svg-wrap relative w-[170px] h-[170px] flex items-center justify-center shrink-0">
+                    <svg viewBox="0 0 180 180" className="w-full h-full transform -rotate-90">
+                      <circle
+                        cx="90"
+                        cy="90"
+                        r="65"
+                        fill="none"
+                        stroke="#e2e8f0"
+                        strokeWidth="24"
+                        opacity="0.3"
+                      />
+                      {(() => {
+                        const colors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'];
+                        const circumference = 2 * Math.PI * 65; // ~408.4
+                        let offset = 0;
+                        return categoryRevenueStats.map((item, idx) => {
+                          const pct = item.percent || 0;
+                          const dash = (pct / 100) * circumference;
+                          const currentOffset = offset;
+                          offset += dash;
+                          return (
+                            <circle
+                              key={item.name}
+                              cx="90"
+                              cy="90"
+                              r="65"
+                              fill="none"
+                              stroke={colors[idx % colors.length]}
+                              strokeWidth="24"
+                              strokeDasharray={`${dash} ${circumference}`}
+                              strokeDashoffset={-currentOffset}
+                              className="transition-all duration-500"
+                            />
+                          );
+                        });
+                      })()}
+                    </svg>
+                    <div className="donut-center-label absolute text-center pointer-events-none">
+                      <span className="block text-[11px] text-muted font-medium">Doanh thu</span>
+                      <strong className="block text-sm font-extrabold text-main">100%</strong>
+                    </div>
+                  </div>
+
+                  <div className="donut-legend flex flex-col gap-2 w-full max-w-[220px]">
+                    {categoryRevenueStats.map((item, idx) => {
+                      const colors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'];
+                      const icons: Record<string, string> = {
+                        'Bàn phím': '⌨️',
+                        'Chuột': '🖱️',
+                        'Màn hình': '🖥️',
+                        'Tai nghe': '🎧',
+                      };
+                      return (
+                        <div key={item.name} className="flex items-center justify-between text-xs py-1 border-b border-slate-100 dark:border-slate-800">
+                          <div className="flex items-center gap-1.5">
+                            <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: colors[idx % colors.length] }} />
+                            <span className="font-medium text-main">{icons[item.name] || '📦'} {item.name}</span>
+                          </div>
+                          <strong className="font-bold text-main">{item.percent}%</strong>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+
             {/* Revenue Structure by Category */}
             <div className="admin-category-revenue-card shadow-sm mb-4">
               <div className="table-card-head">
@@ -1007,13 +1305,18 @@ export default function AdminDashboardPage() {
                 })}
               </div>
             </div>
+          </div>
+        )}
 
+        {/* TAB 2: ORDERS MANAGEMENT */}
+        {activeTab === 'orders' && (
+          <div className="admin-tab-content">
             {/* Orders List Table */}
             <div className="admin-table-card shadow-sm">
               <div className="table-card-head">
                 <div>
                   <h2>Danh Sách Đơn Đặt Hàng ({filteredOrders.length}/{orders.length})</h2>
-                  <span className="table-sub">Quản lý, xem chi tiết và cập nhật trạng thái đơn hàng trực tiếp</span>
+                  <span className="table-sub">Quản lý, tìm kiếm mã đơn và cập nhật trạng thái đơn hàng trực tiếp</span>
                 </div>
                 <button
                   type="button"
@@ -1024,6 +1327,31 @@ export default function AdminDashboardPage() {
                 >
                   📥 Xuất Excel
                 </button>
+              </div>
+
+              {/* Order Search Bar */}
+              <div className="admin-order-search-box mb-3">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="11" cy="11" r="8" />
+                  <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+                <input
+                  type="text"
+                  placeholder="Tìm theo mã đơn (TG-...), tên khách hàng, email, số điện thoại, mã vận đơn..."
+                  value={orderSearch}
+                  onChange={(e) => setOrderSearch(e.target.value)}
+                  className="order-search-input"
+                />
+                {orderSearch && (
+                  <button
+                    type="button"
+                    className="clear-search-btn"
+                    onClick={() => setOrderSearch('')}
+                    title="Xóa tìm kiếm"
+                  >
+                    ✕
+                  </button>
+                )}
               </div>
 
               {/* Order Status Filter Pills */}

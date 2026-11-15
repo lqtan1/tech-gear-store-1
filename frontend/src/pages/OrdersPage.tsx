@@ -6,6 +6,7 @@ import { useAuthStore } from '../features/auth/store';
 import { ORDER_STATUS_LABELS, PAYMENT_METHOD_LABELS, RETURN_REASONS } from '../features/orders/constants';
 import { useOrderStore } from '../features/orders/store';
 import type { Order, OrderStatus } from '../features/orders/types';
+import { useNotificationStore } from '../features/notifications/store';
 import { getProductPrimaryImage } from '../features/products/utils';
 import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 
@@ -105,6 +106,25 @@ export default function OrdersPage() {
           console.warn('Could not sync return request to Supabase:', err);
         }
       }
+
+      // Gửi thông báo đến Admin và Khách hàng
+      const addNotification = useNotificationStore.getState().addNotification;
+      void addNotification({
+        recipientRole: 'admin',
+        title: `Yêu cầu hoàn trả mới #${returnModalOrder.id}`,
+        message: `Khách hàng gửi yêu cầu hoàn trả đơn #${returnModalOrder.id} - Lý do: ${returnReason}.`,
+        type: 'refund',
+        link: '/admin?tab=orders',
+      });
+
+      void addNotification({
+        userId: user?.id,
+        recipientRole: 'customer',
+        title: `Đã gửi yêu cầu hoàn trả #${returnModalOrder.id}`,
+        message: `Yêu cầu hoàn trả cho đơn hàng #${returnModalOrder.id} đã được gửi tới cửa hàng và đang chờ xử lý.`,
+        type: 'refund',
+        link: '/orders',
+      });
 
       setActionBanner(
         `Đã gửi yêu cầu hoàn trả cho đơn hàng ${returnModalOrder.id} thành công! TechGear sẽ liên hệ xử lý trong vòng 24h.`,

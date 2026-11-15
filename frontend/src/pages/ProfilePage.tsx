@@ -1,4 +1,4 @@
-import { useState, useEffect, type FormEvent, type ChangeEvent } from 'react';
+import { useState, useEffect, useMemo, type FormEvent, type ChangeEvent } from 'react';
 import { Link } from 'react-router';
 
 import { useAuth } from '../app/AuthContext';
@@ -6,6 +6,7 @@ import { useAuthStore } from '../features/auth/store';
 import { useCartStore } from '../features/cart/store';
 import { useOrderStore } from '../features/orders/store';
 import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
+import { getProvinces, getDistrictsByProvince } from '../data/vietnamLocations';
 
 export default function ProfilePage() {
   const { profile, user: supabaseUser, updateProfile } = useAuth();
@@ -18,6 +19,7 @@ export default function ProfilePage() {
   const [activeTab, setActiveTab] = useState<'info' | 'password'>('info');
 
   // Tab 1: Form state
+  const provinces = useMemo(() => getProvinces(), []);
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
   const [city, setCity] = useState('');
@@ -25,6 +27,19 @@ export default function ProfilePage() {
   const [address, setAddress] = useState('');
   const [preferredPayment, setPreferredPayment] = useState<'vietqr' | 'cod'>('vietqr');
   const [avatarUrl, setAvatarUrl] = useState('');
+
+  // Available districts for chosen city
+  const availableDistricts = useMemo(() => {
+    return getDistrictsByProvince(city);
+  }, [city]);
+
+  const handleCityChange = (newCity: string) => {
+    setCity(newCity);
+    const newDistricts = getDistrictsByProvince(newCity);
+    if (!newDistricts.includes(district)) {
+      setDistrict(newDistricts.length > 0 ? newDistricts[0] : '');
+    }
+  };
 
   // Tab 2: Password state
   const [newPassword, setNewPassword] = useState('');
@@ -485,14 +500,19 @@ export default function ProfilePage() {
                     <label className="form-label" htmlFor="profile-city">
                       Tỉnh / Thành phố
                     </label>
-                    <input
+                    <select
                       id="profile-city"
-                      type="text"
                       value={city}
-                      onChange={(e) => setCity(e.target.value)}
-                      placeholder="Ví dụ: TP. Hồ Chí Minh, Hà Nội, Đà Nẵng..."
+                      onChange={(e) => handleCityChange(e.target.value)}
                       className="wolf-input w-full"
-                    />
+                    >
+                      <option value="">-- Chọn Tỉnh / Thành phố --</option>
+                      {provinces.map((p) => (
+                        <option key={p} value={p}>
+                          {p}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                 </div>
 
@@ -501,14 +521,20 @@ export default function ProfilePage() {
                     <label className="form-label" htmlFor="profile-district">
                       Quận / Huyện
                     </label>
-                    <input
+                    <select
                       id="profile-district"
-                      type="text"
                       value={district}
                       onChange={(e) => setDistrict(e.target.value)}
-                      placeholder="Ví dụ: Quận 1, Quận 11, Cầu Giấy..."
                       className="wolf-input w-full"
-                    />
+                      disabled={!city}
+                    >
+                      <option value="">-- Chọn Quận / Huyện --</option>
+                      {availableDistricts.map((d) => (
+                        <option key={d} value={d}>
+                          {d}
+                        </option>
+                      ))}
+                    </select>
                   </div>
 
                   <div className="form-group">

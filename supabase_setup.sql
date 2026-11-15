@@ -801,5 +801,80 @@ create policy "Users can delete own cart"
   using (auth.uid() = user_id);
 
 
+-- ==============================================================================
+-- 6. NOTIFICATIONS TABLE (REAL-TIME NOTIFICATIONS FOR CUSTOMER & ADMIN)
+-- ==============================================================================
+create table if not exists public.notifications (
+  id uuid default gen_random_uuid() primary key,
+  user_id uuid references auth.users(id) on delete cascade,
+  recipient_role text not null default 'customer' check (recipient_role in ('customer', 'admin', 'all')),
+  title text not null,
+  message text not null,
+  type text not null default 'order' check (type in ('order', 'shipping', 'refund', 'system', 'promo')),
+  link text,
+  is_read boolean not null default false,
+  created_at timestamptz not null default timezone('utc'::text, now())
+);
+
+create index if not exists idx_notifications_user_id on public.notifications(user_id);
+create index if not exists idx_notifications_recipient_role on public.notifications(recipient_role);
+create index if not exists idx_notifications_is_read on public.notifications(is_read);
+create index if not exists idx_notifications_created_at on public.notifications(created_at desc);
+
+-- Enable RLS
+alter table public.notifications enable row level security;
+
+-- Policies
+drop policy if exists "Users can view own or role notifications" on public.notifications;
+create policy "Users can view own or role notifications"
+  on public.notifications for select
+  using (
+    auth.uid() = user_id
+    or recipient_role = 'all'
+    or (recipient_role = 'admin' and exists (
+      select 1 from public.profiles where profiles.id = auth.uid() and profiles.role = 'admin'
+    ))
+  );
+
+drop policy if exists "Users can insert notifications" on public.notifications;
+create policy "Users can insert notifications"
+  on public.notifications for insert
+  with check (true);
+
+drop policy if exists "Users can update own notifications" on public.notifications;
+create policy "Users can update own notifications"
+  on public.notifications for update
+  using (
+    auth.uid() = user_id
+    or (recipient_role = 'admin' and exists (
+      select 1 from public.profiles where profiles.id = auth.uid() and profiles.role = 'admin'
+    ))
+  );
+
+drop policy if exists "Users can delete own notifications" on public.notifications;
+create policy "Users can delete own notifications"
+  on public.notifications for delete
+  using (
+    auth.uid() = user_id
+    or (recipient_role = 'admin' and exists (
+      select 1 from public.profiles where profiles.id = auth.uid() and profiles.role = 'admin'
+    ))
+  );
+
+-- Enable realtime for notifications
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables 
+    where pubname = 'supabase_realtime' and tablename = 'notifications'
+  ) then
+    alter publication supabase_realtime add table public.notifications;
+  end if;
+exception
+  when others then null;
+end $$;
+
+
+
 
 

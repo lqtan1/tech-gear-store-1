@@ -1,13 +1,15 @@
-import { useRef, useState, useEffect, type FormEvent } from 'react';
+import { useRef, useState, useEffect, useMemo, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router';
 
 import TrustBar from '../components/TrustBar';
 import { useAuth } from '../app/AuthContext';
 import { useAuthStore } from '../features/auth/store';
 import { useCartStore } from '../features/cart/store';
+import { useNotificationStore } from '../features/notifications/store';
 import { useOrderStore } from '../features/orders/store';
 import type { PaymentMethod, ShippingInformation } from '../features/orders/types';
 import { getProductPrimaryImage } from '../features/products/utils';
+import { getProvinces, getDistrictsByProvince } from '../data/vietnamLocations';
 
 const formatPrice = (price: number) => `${price.toLocaleString('vi-VN')} đ`;
 
@@ -17,12 +19,48 @@ export default function CheckoutPage() {
   const items = useCartStore((state) => state.items);
   const clearCart = useCartStore((state) => state.clearCart);
   const createOrder = useOrderStore((state) => state.createOrder);
+  const addNotification = useNotificationStore((state) => state.addNotification);
   const navigate = useNavigate();
   const formRef = useRef<HTMLFormElement | null>(null);
 
   const [submitted, setSubmitted] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('vietqr');
   const [orderId, setOrderId] = useState('');
+
+  // Administrative Address Dropdowns
+  const provinces = useMemo(() => getProvinces(), []);
+  const [city, setCity] = useState('');
+  const [district, setDistrict] = useState('');
+  const [addressDetail, setAddressDetail] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [phone, setPhone] = useState('');
+
+  // Available districts for chosen city
+  const availableDistricts = useMemo(() => {
+    return getDistrictsByProvince(city);
+  }, [city]);
+
+  // Pre-fill from profile or user state
+  useEffect(() => {
+    const savedName = profile?.full_name || user?.name || '';
+    const savedPhone = profile?.phone || user?.phone || '';
+    const savedCity = profile?.city || user?.city || 'TP. Hồ Chí Minh';
+    const savedDistrict = profile?.district || user?.district || '';
+    const savedAddress = profile?.address || user?.address || '';
+
+    if (savedName) setFullName(savedName);
+    if (savedPhone) setPhone(savedPhone);
+    if (savedCity) {
+      setCity(savedCity);
+      const districtsForCity = getDistrictsByProvince(savedCity);
+      if (savedDistrict && districtsForCity.includes(savedDistrict)) {
+        setDistrict(savedDistrict);
+      } else if (districtsForCity.length > 0) {
+        setDistrict(districtsForCity[0]);
+      }
+    }
+    if (savedAddress) setAddressDetail(savedAddress);
+  }, [profile, user]);
 
   // Sync preferred payment when profile loads
   useEffect(() => {
@@ -32,27 +70,28 @@ export default function CheckoutPage() {
     }
   }, [profile?.preferred_payment, user?.preferred_payment]);
 
-  const defaultFullAddress = profile?.address
-    ? `${profile.address}${profile.district ? ', ' + profile.district : ''}${profile.city ? ', ' + profile.city : ''}`
-    : user?.address || '';
-
   const total = items.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
   const transferNote = 'TECHGEAR THANH TOAN';
   const dynamicVietQrUrl = `https://img.vietqr.io/image/VCB-0161001693924-qr_only.png?amount=${total}&addInfo=${encodeURIComponent(transferNote)}`;
 
+  const buildFullAddress = (): string => {
+    const parts = [addressDetail.trim(), district, city].filter(Boolean);
+    return parts.join(', ');
+  };
+
   const readShippingFromForm = (useFallbackDefaults: boolean): ShippingInformation => {
     const formEl = formRef.current;
     const formData = formEl ? new FormData(formEl) : null;
-    const name = String(formData?.get('name') ?? '').trim();
-    const phone = String(formData?.get('phone') ?? '').trim();
-    const address = String(formData?.get('address') ?? '').trim();
+    const resolvedName = fullName.trim() || String(formData?.get('name') ?? '').trim();
+    const resolvedPhone = phone.trim() || String(formData?.get('phone') ?? '').trim();
+    const resolvedAddress = buildFullAddress();
     const noteValue = String(formData?.get('note') ?? '').trim();
 
     return {
-      name: name || (useFallbackDefaults ? user?.name || 'Khách hàng TechGear' : ''),
-      phone: phone || (useFallbackDefaults ? '0335744258' : ''),
+      name: resolvedName || (useFallbackDefaults ? user?.name || 'Khách hàng TechGear' : ''),
+      phone: resolvedPhone || (useFallbackDefaults ? '0335744258' : ''),
       address:
-        address || (useFallbackDefaults ? 'Thanh toán chuyển khoản nhanh VietQR - TechGear Store' : ''),
+        resolvedAddress || (useFallbackDefaults ? 'Thanh toán chuyển khoản nhanh VietQR - TechGear Store' : ''),
       note: noteValue.length > 0 ? noteValue : undefined,
     };
   };
@@ -68,6 +107,25 @@ export default function CheckoutPage() {
     setOrderId(order.id);
     setSubmitted(true);
     clearCart();
+
+    // 1. Notify Customer
+    void addNotification({
+      userId: user?.id,
+      recipientRole: 'customer',
+      title: `Đặt hàng thành công #${order.id}`,
+      message: `Đơn hàng của bạn trị giá ${formatPrice(order.total)} đã được tạo và đang chờ xác nhận.`,
+      type: 'order',
+      link: '/orders',
+    });
+
+    // 2. Notify Admin
+    void addNotification({
+      recipientRole: 'admin',
+      title: `Đơn hàng mới #${order.id}`,
+      message: `Khách hàng ${shipping.name} vừa đặt đơn mới (${formatPrice(order.total)}).`,
+      type: 'order',
+      link: '/admin?tab=orders',
+    });
   };
 
   const handleSimulateTransferSuccess = () => {
@@ -79,6 +137,26 @@ export default function CheckoutPage() {
       customerEmail: user?.email,
     });
     clearCart();
+
+    // Notify Customer
+    void addNotification({
+      userId: user?.id,
+      recipientRole: 'customer',
+      title: `Thanh toán VietQR thành công #${order.id}`,
+      message: `Đơn hàng ${order.id} (${formatPrice(order.total)}) đã hoàn tất thanh toán và chuyển trạng thái Chờ giao hàng.`,
+      type: 'order',
+      link: '/orders',
+    });
+
+    // Notify Admin
+    void addNotification({
+      recipientRole: 'admin',
+      title: `Đơn hàng đã thanh toán #${order.id}`,
+      message: `Khách hàng ${shipping.name} đã quét mã VietQR thanh toán ${formatPrice(order.total)}.`,
+      type: 'order',
+      link: '/admin?tab=orders',
+    });
+
     navigate('/orders', {
       state: {
         successBanner: `Thanh toán VietQR thành công! Đơn hàng ${order.id} (${formatPrice(order.total)}) đã được ghi nhận trạng thái "Đã thanh toán".`,
@@ -180,8 +258,8 @@ export default function CheckoutPage() {
                   id="checkout-name"
                   required
                   name="name"
-                  key={`name-${profile?.full_name || user?.name || ''}`}
-                  defaultValue={profile?.full_name || user?.name || ''}
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
                   placeholder="Ví dụ: Nguyễn Văn An"
                   className="wolf-input"
                 />
@@ -196,24 +274,66 @@ export default function CheckoutPage() {
                   type="tel"
                   inputMode="tel"
                   minLength={9}
-                  key={`phone-${profile?.phone || user?.phone || ''}`}
-                  defaultValue={profile?.phone || user?.phone || ''}
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
                   placeholder="Ví dụ: 0987654321"
                   className="wolf-input"
                 />
               </div>
 
-              <div className="form-group full-width">
-                <label htmlFor="checkout-address">Địa chỉ giao hàng chi tiết *</label>
-                <textarea
-                  id="checkout-address"
+              <div className="form-group">
+                <label htmlFor="checkout-city">Tỉnh / Thành phố *</label>
+                <select
+                  id="checkout-city"
                   required
-                  name="address"
-                  rows={3}
-                  key={`addr-${defaultFullAddress}`}
-                  defaultValue={defaultFullAddress}
-                  placeholder="Số nhà, tên đường, phường/xã, quận/huyện, tỉnh/thành phố..."
-                  className="wolf-textarea"
+                  name="city"
+                  value={city}
+                  onChange={(e) => {
+                    const newCity = e.target.value;
+                    setCity(newCity);
+                    const newDistricts = getDistrictsByProvince(newCity);
+                    setDistrict(newDistricts.length > 0 ? newDistricts[0] : '');
+                  }}
+                  className="wolf-input"
+                >
+                  <option value="">-- Chọn Tỉnh / Thành phố --</option>
+                  {provinces.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label htmlFor="checkout-district">Quận / Huyện *</label>
+                <select
+                  id="checkout-district"
+                  required
+                  name="district"
+                  value={district}
+                  onChange={(e) => setDistrict(e.target.value)}
+                  className="wolf-input"
+                  disabled={!city}
+                >
+                  <option value="">-- Chọn Quận / Huyện --</option>
+                  {availableDistricts.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="form-group full-width">
+                <label htmlFor="checkout-address-detail">Địa chỉ chi tiết (Số nhà, tên đường, ngõ/xóm) *</label>
+                <input
+                  id="checkout-address-detail"
+                  required
+                  value={addressDetail}
+                  onChange={(e) => setAddressDetail(e.target.value)}
+                  placeholder="Ví dụ: 123 Nguyễn Thị Minh Khai, Phường Bến Nghé"
+                  className="wolf-input"
                 />
               </div>
 
